@@ -32,7 +32,7 @@ p_axis <- ggplot(filtered_data, aes(x = FC, y = IBD, color = group)) +
   scale_color_manual(values = c("IBD" = "#D7191C", "Controls" = "#2C7BB6")) +
   labs(
     x = "Fecal calprotectin",
-    y = "Probability of disease using 6 Bac markers", 
+    y = "Probability of disease using 6 Bac markers + FC", 
     color = "group"
   ) +
   theme_minimal(base_size = 14) +
