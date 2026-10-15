@@ -1,5 +1,5 @@
 # ==============================================================================
-# Figure 2g: ROC Curves for Validation Cohort
+# ROC Curves for Validation Cohort
 # ==============================================================================
 
 # 1. Load validation data (ensure it contains FC, ddpcr_model_POD, fc.ddpcr_model_POD, and group)
