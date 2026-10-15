@@ -1,0 +1,108 @@
+# ==============================================================================
+# Subgroup Performance Evaluation & Forest Plot Generation
+# ==============================================================================
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(pROC)
+
+# Helper function to compute AUC and 95% CI
+get_auc_ci <- function(group, pred, model_name) {
+  roc_obj <- pROC::roc(group, pred, direction = "<")
+  ci_auc  <- pROC::ci.auc(roc_obj)
+  data.frame(
+    model   = model_name,
+    auc     = as.numeric(pROC::auc(roc_obj)),
+    ci_lower = ci_auc[1],
+    ci_upper = ci_auc[3]
+  )
+}
+
+# Helper wrapper for evaluating specific data subsets
+evaluate_subgroup <- function(dat, label_col, pos_class, neg_class) {
+  df <- dat %>% filter(!!sym(label_col) %in% c(pos_class, neg_class))
+  df$bin_label <- factor(df[[label_col]], levels = c(neg_class, pos_class))
+  
+  rbind(
+    cbind(group = unique(df[[label_col]]), get_auc_ci(df$bin_label, df$fc.ddpcr_model_POD, "FC+6 Bac")),
+    cbind(group = unique(df[[label_col]]), get_auc_ci(df$bin_label, df$ddpcr_model_POD, "6 Bac")),
+    cbind(group = unique(df[[label_col]]), get_auc_ci(df$bin_label, df$FC, "FC"))
+  )
+}
+
+# Load data tables
+test_res <- read.csv("test_predictions.csv", row.names = 1)
+data_table <- read.csv("data_table.csv", row.names = 1)[rownames(test_res), , drop = FALSE]
+meta_table <- read.csv("meta_table.csv", row.names = 1)[rownames(test_res), , drop = FALSE]
+
+test_res$Center <- data_table$Center
+test_res$group2 <- data_table$group
+
+# ==============================================================================
+# Compute Subgroup AUCs across clinical categories
+# ==============================================================================
+results_list <- list()
+
+# 1. Overall Test Set
+results_list[[1]] <- data.frame(
+  type = "Test set",
+  rbind(
+    cbind(group = "Overall", get_auc_ci(test_res$group, test_res$fc.ddpcr_model_POD, "FC+6 Bac")),
+    cbind(group = "Overall", get_auc_ci(test_res$group, test_res$ddpcr_model_POD, "6 Bac")),
+    cbind(group = "Overall", get_auc_ci(test_res$group, test_res$FC, "FC"))
+  )
+)
+
+# 2. Geography / Ethnicity
+test_res$region <- case_when(
+  test_res$Center %in% c("Beijing", "Guangzhou", "Kunming", "Shanghai", "Taiwan") ~ "East Asia",
+  test_res$Center %in% c("Malaysia", "Singapore", "Thailand", "Vietnam", "Myanmar", "Indonesia") ~ "Southeast Asia",
+  test_res$Center %in% c("Canada", "Germany", "Austria", "Australia") ~ "Non-Asia",
+  TRUE ~ NA_character_
+)
+
+geo_df <- data.frame()
+for(reg in unique(na.omit(test_res$region))) {
+  sub_d <- test_res %>% filter(region == reg)
+  geo_df <- rbind(geo_df, cbind(group = reg, evaluate_subgroup(sub_d, "group", "IBD", "Controls")))
+}
+results_list[[2]] <- data.frame(type = "Geography", geo_df)
+
+# ==============================================================================
+# Combine and Format Results for Plotting
+# ==============================================================================
+results_df <- do.call(rbind, lapply(results_list, as.data.frame))
+
+# Format factors for clean visualization matching panel h
+results_df$model <- factor(results_df$model, levels = c("FC+6 Bac", "6 Bac", "FC"))
+
+# Generate Forest Plot
+P <- ggplot(results_df, aes(x = auc, y = group, color = model)) +
+  geom_vline(xintercept = c(0.4, 0.6, 0.8, 1.0), color = "gray80", linetype = "dashed", linewidth = 0.5) +
+  geom_point(position = position_dodge(width = 0.6), size = 3.5) +
+  geom_errorbar(aes(xmin = ci_lower, xmax = ci_upper), position = position_dodge(width = 0.6), width = 0.4, linewidth = 0.8) +
+  facet_grid(type ~ ., scales = "free_y", space = "free_y") +
+  scale_color_manual(values = c("#349839", "#E17153", "#2072A8")) +
+  labs(x = "AUC (95% CI)", y = NULL) +
+  xlim(0.3, 1.02) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(size = 14, face = "bold", color = "black"),
+    axis.text.y = element_text(size = 14, color = "black"),
+    strip.text = element_text(size = 14, face = "bold", color = "black"),
+    axis.title.x = element_text(size = 16, face = "bold"),
+    legend.text = element_text(size = 14),
+    legend.title = element_blank(),
+    panel.grid = element_blank(),
+    panel.background = element_rect(color = 'black', fill = 'transparent'),
+    strip.background = element_rect(color = 'grey90', fill = 'grey90'),
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 1),
+    legend.position = 'bottom'
+  )
+
+print(P)
+
+# Save plots with clean filenames
+ggsave("subgroup_forest_plot.png", P, width = 8, height = 11, dpi = 600)
+write.csv(results_df, "subgroup_auc_results.csv", row.names = FALSE)
