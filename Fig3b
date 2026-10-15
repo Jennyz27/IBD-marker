@@ -1,0 +1,84 @@
+# ==============================================================================
+# Figure 3B: Center-wise AUC Forest Plot on Test Set
+# ==============================================================================
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+get_auc_ci <- function(group, pred, model_name) {
+  roc_obj <- pROC::roc(group, pred)
+  ci_auc  <- pROC::ci.auc(roc_obj)
+  data.frame(
+    Model   = model_name,
+    AUC     = as.numeric(pROC::auc(roc_obj)),
+    CI_low  = ci_auc[1],
+    CI_high = ci_auc[3]
+  )
+}
+
+test_res <- read.csv("testset_results_18marker.csv", row.names = 1)
+
+
+data_table <- read.csv("data_table20260712_3860samples.csv", row.names = 1)
+
+data_center <- test_res
+data_center$Center <- data_table[rownames(data_center), "Center"]
+data_center <- data_center[data_center$Center != "USA", ] # Remove USA center due to lack of controls
+
+
+results_149_dd <- data_center %>%
+  group_by(Center) %>%
+  do({
+     get_auc_ci(.$group, .$ddpcr_model_POD, "ddPCR")
+  }) %>%
+  ungroup() %>%
+  mutate(region = case_when(
+    Center %in% c("Beijing", "Guangzhou", "Kunming", "Shanghai", "Taiwan") ~ "East Asia",
+    Center %in% c("Malaysia", "Singapore", "Thailand", "Vietnam", "Myanmar", "Indonesia") ~ "Southeast Asia",
+    Center %in% c("Canada", "Germany", "Austria", "Australia") ~ "Non-Asia",
+    TRUE ~ NA_character_
+  ))
+
+results_149_dd$region <- factor(
+  results_149_dd$region,
+  levels = c("Non-Asia", "East Asia", "Southeast Asia")
+)
+
+results_149_dd$Center <- factor(
+  results_149_dd$Center,
+  levels = c("Vietnam", "Thailand", "Indonesia", "Malaysia", "Myanmar",
+             "Kunming", "Guangzhou", "Shanghai", "Beijing",
+             "Taiwan", "Germany", "Austria",
+             "Canada", "Australia")
+)
+
+P_center2 <- ggplot(results_149_dd, aes(x = AUC, y = Center, color = region)) +
+  geom_vline(xintercept = c(0.6, 0.8, 1), color = "gray",
+             linetype = "dashed", linewidth = 0.5) +
+  geom_point(position = position_dodge(width = 0.5), size = 6) +
+  geom_errorbar(aes(xmin = CI_low, xmax = CI_high),
+                position = position_dodge(width = 0.5), width = 0.5, linewidth = 1) +
+  scale_color_manual(values = c("#F09594", "#85BA8F", "#A3C8DC", "#E1C05E"), name = "Geography") +
+  scale_x_continuous(limits = c(0.5, 1.02), breaks = seq(0.6, 1, 0.2),
+                     expand = c(0.01, 0)) +
+  labs(x = "AUC (95% CI)", y = "Center") +
+  theme_minimal() +
+  theme(
+    axis.text.x  = element_text(size = 20, face = "bold"),
+    axis.text.y  = element_text(size = 20),
+    axis.title.y = element_blank(),
+    axis.title.x = element_text(size = 20, face = "bold"),
+    legend.text  = element_text(size = 18),
+    legend.title = element_text(size = 18, face = "bold"),
+    panel.grid   = element_blank(),
+    panel.background = element_rect(color = 'black', fill = 'transparent'),
+    strip.background = element_rect(color = 'black'),
+    legend.spacing.y = unit(1.5, "cm"),
+    legend.key.height = unit(0.8, "cm"),
+    panel.border = element_rect(fill = NA, color = "black", linewidth = 1),
+    axis.text   = element_text(color = 'black')
+  )
+
+print(P_center2)
+ggsave("forest_plot_each_center2.png", P_center2, width = 8, height = 7)
