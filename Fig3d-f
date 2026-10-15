@@ -1,5 +1,5 @@
 # ==============================================================================
-# Figure 2d-f: ROC Curves for Test Set (FC, 6 Bac, and FC + 6 Bac Models)
+# ROC Curves for Test Set (FC, 6 Bac, and FC + 6 Bac Models)
 # ==============================================================================
 
 library(pROC)
