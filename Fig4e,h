@@ -1,0 +1,185 @@
+# ==============================================================================
+# NRI Analysis and Forest Plot Pipeline (Full & Grayzone Cohorts)
+# ==============================================================================
+
+library(pROC)
+library(ggplot2)
+library(dplyr)
+
+# 1. Standardized prediction parsing function
+parse_pred_vec <- function(vec) {
+  s <- toupper(trimws(as.character(vec)))
+  ifelse(grepl("IBD|POS|POSITIVE|1|TRUE", s) & !grepl("NON-IBD|NON_IBD", s), "Positive", "Negative")
+}
+
+# 2. Paired Binary NRI calculation function (Pencina method)
+calc_paired_binary_nri <- function(data, group_col, old_pred_col, new_pred_col, 
+                                   pos_group = "IBD", pos_pred = "Positive") {
+  sub_df <- data[, c(group_col, old_pred_col, new_pred_col)]
+  sub_df <- na.omit(sub_df)
+  
+  y <- ifelse(toupper(trimws(as.character(sub_df[[group_col]]))) == toupper(pos_group), 1, 0)
+  
+  parse_pred <- function(val) {
+    s <- toupper(trimws(as.character(val)))
+    if (grepl("IBD|POS|POSITIVE|1|TRUE", s) && !grepl("NON-IBD|NON_IBD", s)) return(1)
+    return(0)
+  }
+  
+  old_p <- sapply(sub_df[[old_pred_col]], parse_pred)
+  new_p <- sapply(sub_df[[new_pred_col]], parse_pred)
+  
+  # IBD Events group (y = 1)
+  idx_e <- (y == 1)
+  n_e <- sum(idx_e)
+  old_e <- old_p[idx_e]
+  new_e <- new_p[idx_e]
+  
+  sens_old <- sum(old_e == 1) / n_e
+  sens_new <- sum(new_e == 1) / n_e
+  c_e <- sum(old_e == 0 & new_e == 1)
+  b_e <- sum(old_e == 1 & new_e == 0)
+  
+  nri_e <- (c_e - b_e) / n_e
+  se_e <- if ((b_e + c_e) > 0) sqrt((b_e + c_e) - (b_e - c_e)^2 / n_e) / n_e else 0
+  
+  # Non-IBD Non-events group (y = 0)
+  idx_ne <- (y == 0)
+  n_ne <- sum(idx_ne)
+  old_ne <- old_p[idx_ne]
+  new_ne <- new_p[idx_ne]
+  
+  spec_old <- sum(old_ne == 0) / n_ne
+  spec_new <- sum(new_ne == 0) / n_ne
+  f_ne <- sum(old_ne == 1 & new_ne == 0)
+  g_ne <- sum(old_ne == 0 & new_ne == 1)
+  
+  nri_ne <- (f_ne - g_ne) / n_ne
+  se_ne <- if ((f_ne + g_ne) > 0) sqrt((f_ne + g_ne) - (f_ne - g_ne)^2 / n_ne) / n_ne else 0
+  
+  # Total NRI & Z-test
+  nri_total <- nri_e + nri_ne
+  se_total <- sqrt(se_e^2 + se_ne^2)
+  z_score <- if (se_total > 0) nri_total / se_total else 0
+  p_val <- 2 * (1 - pnorm(abs(z_score)))
+  
+  ci_low <- nri_total - 1.96 * se_total
+  ci_high <- nri_total + 1.96 * se_total
+  
+  list(
+    N_Events = n_e, N_NonEvents = n_ne,
+    Sens_Old = sens_old, Sens_New = sens_new,
+    Spec_Old = spec_old, Spec_New = spec_new,
+    NRI_Events = nri_e, NRI_NonEvents = nri_ne, NRI_Total = nri_total,
+    SE_Total = se_total, Z_Score = z_score, P_Value = p_val,
+    CI_95_Low = ci_low, CI_95_High = ci_high
+  )
+}
+
+# 3. Comprehensive analysis pipeline function for any subset
+run_nri_pipeline <- function(df, cohort_name, file_prefix) {
+  cat(sprintf("\n========================================================\n"))
+  cat(sprintf("Running NRI & Forest Plot Pipeline: %s\n", cohort_name))
+  cat(sprintf("========================================================\n"))
+  
+  # Standardize predictions
+  df$FC_pred_std     <- parse_pred_vec(df$FC_predict_rsults)
+  df$bac_pred_std    <- parse_pred_vec(df$X6bac_predict_rsults)
+  df$combo_pred_std  <- parse_pred_vec(df$X6bac_FC_predict_rsults)
+  
+  # Cross-tabulations
+  cat("\n--- Cross-tabulation: FC vs 6Bac ---\n")
+  print(xtabs(~ FC_pred_std + bac_pred_std + group, data = df))
+  
+  cat("\n--- Cross-tabulation: FC vs 6Bac_FC ---\n")
+  print(xtabs(~ FC_pred_std + combo_pred_std + group, data = df))
+  
+  # Calculate NRI
+  nri_6bac <- calc_paired_binary_nri(df, "group", "FC_predict_rsults", "X6bac_predict_rsults")
+  nri_combo <- calc_paired_binary_nri(df, "group", "FC_predict_rsults", "X6bac_FC_predict_rsults")
+  
+  # Build Forest Plot Data Frame
+  nri_plot_df <- data.frame(
+    Model = c(rep("6Bac vs. FC", 3), rep("6Bac_FC vs. FC", 3)),
+    Metric = factor(
+      rep(c("NRI (Events / IBD)", "NRI (Non-events / Non-IBD)", "Total Categorical NRI"), 2),
+      levels = c("Total Categorical NRI", "NRI (Non-events / Non-IBD)", "NRI (Events / IBD)")
+    ),
+    Estimate = c(nri_6bac$NRI_Events, nri_6bac$NRI_NonEvents, nri_6bac$NRI_Total,
+                 nri_combo$NRI_Events, nri_combo$NRI_NonEvents, nri_combo$NRI_Total),
+    Low = c(
+      nri_6bac$NRI_Events - 1.96 * (if(nri_6bac$N_Events > 0) sqrt((sum(df$FC_pred_std[df$group=="IBD"]=="Negative" & df$bac_pred_std[df$group=="IBD"]=="Positive") + sum(df$FC_pred_std[df$group=="IBD"]=="Positive" & df$bac_pred_std[df$group=="IBD"]=="Negative")) - (sum(df$FC_pred_std[df$group=="IBD"]=="Negative" & df$bac_pred_std[df$group=="IBD"]=="Positive") - sum(df$FC_pred_std[df$group=="IBD"]=="Positive" & df$bac_pred_std[df$group=="IBD"]=="Negative"))^2 / nri_6bac$N_Events) / nri_6bac$N_Events else 0),
+      nri_6bac$NRI_NonEvents - 1.96 * (if(nri_6bac$N_NonEvents > 0) sqrt((sum(df$FC_pred_std[df$group=="Non-IBD"]=="Positive" & df$bac_pred_std[df$group=="Non-IBD"]=="Negative") + sum(df$FC_pred_std[df$group=="Non-IBD"]=="Negative" & df$bac_pred_std[df$group=="Non-IBD"]=="Positive")) - (sum(df$FC_pred_std[df$group=="Non-IBD"]=="Positive" & df$bac_pred_std[df$group=="Non-IBD"]=="Negative") - sum(df$FC_pred_std[df$group=="Non-IBD"]=="Negative" & df$bac_pred_std[df$group=="Non-IBD"]=="Positive"))^2 / nri_6bac$N_NonEvents) / nri_6bac$N_NonEvents else 0),
+      nri_6bac$CI_95_Low,
+      nri_combo$NRI_Events - 1.96 * (if(nri_combo$N_Events > 0) sqrt((sum(df$FC_pred_std[df$group=="IBD"]=="Negative" & df$combo_pred_std[df$group=="IBD"]=="Positive") + sum(df$FC_pred_std[df$group=="IBD"]=="Positive" & df$combo_pred_std[df$group=="IBD"]=="Negative")) - (sum(df$FC_pred_std[df$group=="IBD"]=="Negative" & df$combo_pred_std[df$group=="IBD"]=="Positive") - sum(df$FC_pred_std[df$group=="IBD"]=="Positive" & df$combo_pred_std[df$group=="IBD"]=="Negative"))^2 / nri_combo$N_Events) / nri_combo$N_Events else 0),
+      nri_combo$NRI_NonEvents - 1.96 * (if(nri_combo$N_NonEvents > 0) sqrt((sum(df$FC_pred_std[df$group=="Non-IBD"]=="Positive" & df$combo_pred_std[df$group=="Non-IBD"]=="Negative") + sum(df$FC_pred_std[df$group=="Non-IBD"]=="Negative" & df$combo_pred_std[df$group=="Non-IBD"]=="Positive")) - (sum(df$FC_pred_std[df$group=="Non-IBD"]=="Positive" & df$combo_pred_std[df$group=="Non-IBD"]=="Negative") - sum(df$FC_pred_std[df$group=="Non-IBD"]=="Negative" & df$combo_pred_std[df$group=="Non-IBD"]=="Positive"))^2 / nri_combo$N_NonEvents) / nri_combo$N_NonEvents else 0),
+      nri_combo$CI_95_Low
+    ),
+    High = c(
+      nri_6bac$NRI_Events + 1.96 * (if(nri_6bac$N_Events > 0) sqrt((sum(df$FC_pred_std[df$group=="IBD"]=="Negative" & df$bac_pred_std[df$group=="IBD"]=="Positive") + sum(df$FC_pred_std[df$group=="IBD"]=="Positive" & df$bac_pred_std[df$group=="IBD"]=="Negative")) - (sum(df$FC_pred_std[df$group=="IBD"]=="Negative" & df$bac_pred_std[df$group=="IBD"]=="Positive") - sum(df$FC_pred_std[df$group=="IBD"]=="Positive" & df$bac_pred_std[df$group=="IBD"]=="Negative"))^2 / nri_6bac$N_Events) / nri_6bac$N_Events else 0),
+      nri_6bac$NRI_NonEvents + 1.96 * (if(nri_6bac$N_NonEvents > 0) sqrt((sum(df$FC_pred_std[df$group=="Non-IBD"]=="Positive" & df$bac_pred_std[df$group=="Non-IBD"]=="Negative") + sum(df$FC_pred_std[df$group=="Non-IBD"]=="Negative" & df$bac_pred_std[df$group=="Non-IBD"]=="Positive")) - (sum(df$FC_pred_std[df$group=="Non-IBD"]=="Positive" & df$bac_pred_std[df$group=="Non-IBD"]=="Negative") - sum(df$FC_pred_std[df$group=="Non-IBD"]=="Negative" & df$bac_pred_std[df$group=="Non-IBD"]=="Positive"))^2 / nri_6bac$N_NonEvents) / nri_6bac$N_NonEvents else 0),
+      nri_6bac$CI_95_High,
+      nri_combo$NRI_Events + 1.96 * (if(nri_combo$N_Events > 0) sqrt((sum(df$FC_pred_std[df$group=="IBD"]=="Negative" & df$combo_pred_std[df$group=="IBD"]=="Positive") + sum(df$FC_pred_std[df$group=="IBD"]=="Positive" & df$combo_pred_std[df$group=="IBD"]=="Negative")) - (sum(df$FC_pred_std[df$group=="IBD"]=="Negative" & df$combo_pred_std[df$group=="IBD"]=="Positive") - sum(df$FC_pred_std[df$group=="IBD"]=="Positive" & df$combo_pred_std[df$group=="IBD"]=="Negative"))^2 / nri_combo$N_Events) / nri_combo$N_Events else 0),
+      nri_combo$NRI_NonEvents + 1.96 * (if(nri_combo$N_NonEvents > 0) sqrt((sum(df$FC_pred_std[df$group=="Non-IBD"]=="Positive" & df$combo_pred_std[df$group=="Non-IBD"]=="Negative") + sum(df$FC_pred_std[df$group=="Non-IBD"]=="Negative" & df$combo_pred_std[df$group=="Non-IBD"]=="Positive")) - (sum(df$FC_pred_std[df$group=="Non-IBD"]=="Positive" & df$combo_pred_std[df$group=="Non-IBD"]=="Negative") - sum(df$FC_pred_std[df$group=="Non-IBD"]=="Negative" & df$combo_pred_std[df$group=="Non-IBD"]=="Positive"))^2 / nri_combo$N_NonEvents) / nri_combo$N_NonEvents else 0),
+      nri_combo$CI_95_High
+    ),
+    P_val = c(
+      NA, NA, ifelse(nri_6bac$P_Value < 0.001, "p < 0.001", sprintf("p = %.3f", nri_6bac$P_Value)),
+      NA, NA, ifelse(nri_combo$P_Value < 0.001, "p < 0.001", sprintf("p = %.3f", nri_combo$P_Value))
+    )
+  )
+  
+  nri_plot_df$Label <- ifelse(
+    is.na(nri_plot_df$P_val),
+    sprintf("%.3f (%.3f to %.3f)", nri_plot_df$Estimate, nri_plot_df$Low, nri_plot_df$High),
+    sprintf("%.3f (%.3f to %.3f), %s", nri_plot_df$Estimate, nri_plot_df$Low, nri_plot_df$High, nri_plot_df$P_val)
+  )
+  
+  # Plot Forest Plot
+  x_min <- min(nri_plot_df$Low, -0.2) - 0.05
+  x_max <- max(nri_plot_df$High, 0.4) + 0.45
+  
+  p_forest <- ggplot(nri_plot_df, aes(x = Estimate, y = Metric, color = Model)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey50", size = 0.6) +
+    geom_errorbarh(aes(xmin = Low, xmax = High), height = 0.25, size = 0.9, position = position_dodge(width = 0.5)) +
+    geom_point(size = 3.5, shape = 15, position = position_dodge(width = 0.5)) +
+    geom_text(aes(x = High + 0.02, label = Label), hjust = 0, size = 3.5, show.legend = FALSE, position = position_dodge(width = 0.5)) +
+    scale_color_manual(values = c("6Bac vs. FC" = "#2072A8", "6Bac_FC vs. FC" = "#EA5D2D")) +
+    scale_x_continuous(limits = c(x_min, x_max), breaks = seq(round(x_min, 1), round(x_max - 0.4, 1), 0.2)) +
+    labs(
+      x = "Net Reclassification Improvement (NRI)",
+      y = NULL,
+      color = "Comparison Model",
+      title = sprintf("NRI Analysis - %s", cohort_name)
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor = element_blank(),
+      plot.title = element_text(face = "bold", size = 13),
+      axis.text.y = element_text(face = "bold", color = "black"),
+      legend.position = "top",
+      legend.title = element_text(face = "bold")
+    )
+  
+  print(p_forest)
+  ggsave(sprintf("%s_NRI_Forest_Plot.png", file_prefix), plot = p_forest, width = 9, height = 5, dpi = 600)
+}
+
+# ==============================================================================
+# 4. Main Execution
+# ==============================================================================
+file_path <- "428GIcohort_pod.csv"
+df_raw <- read.csv(file_path, stringsAsFactors = FALSE)
+df_raw <- df_raw[!is.na(df_raw$FC), ]
+
+if (!"FC_predict_rsults" %in% colnames(df_raw)) {
+  df_raw$FC_predict_rsults <- ifelse(as.numeric(df_raw$FC) >= 100, "Positive", "Negative")
+}
+
+# 1. (All Samples)[cite: 10, 11]
+run_nri_pipeline(df_raw, cohort_name = "Full Cohort", file_prefix = "all_cohort")
+
+# 2. (Grayzone: FC 50 - 250)[cite: 9, 12]
+df_grayzone <- df_raw[df_raw$FC >= 50 & df_raw$FC <= 250, ]
+run_nri_pipeline(df_grayzone, cohort_name = "Grayzone Cohort (FC 50-250)", file_prefix = "grayzone_cohort")
