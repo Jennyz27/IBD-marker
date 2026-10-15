@@ -1,0 +1,101 @@
+# ==============================================================================
+# 1. Model Training and Prediction for Bacterial Markers and FC
+# ==============================================================================
+
+library(caret)
+library(ranger)
+library(dplyr)
+library(pROC)
+
+# Load data
+data_raw <- read.csv("data_table.csv", row.names = 1)
+data_fc  <- data_raw[!is.na(data_raw$FC), ]
+
+data$group <- factor(data$group, levels = c("Controls", "IBD"))
+
+# Select specific features (FC + 6 bacterial markers)
+selected_features <- c("FC", "Csp", "Gm", "Clep", "Fs", "RO", "RINT")
+data <- data[, c("group", selected_features)]
+
+# Training control configuration
+control <- trainControl(
+  method = "cv",
+  number = 10,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final",
+  verboseIter = FALSE
+)
+
+tunegrid <- expand.grid(
+  mtry = 1:ceiling(sqrt(length(selected_features))),
+  splitrule = "gini",
+  min.node.size = c(50, 100, 150)
+)
+
+# Data partitioning (70% train, 30% test)
+set.seed(321)
+trainIndex <- createDataPartition(data$group, p = 0.7, list = FALSE)
+trainData <- data[trainIndex, ]
+testData  <- data[-trainIndex, ]
+
+# ------------------------------------------------------------------------------
+# A. Combined Model (FC + 6 Bacterial Markers)
+# ------------------------------------------------------------------------------
+set.seed(100)
+model_fc_bac <- train(
+  group ~ .,
+  data = trainData,
+  method = "ranger",
+  metric = "ROC",
+  trControl = control,
+  tuneGrid = tunegrid,
+  num.trees = 700,
+  max.depth = 10,
+  importance = 'impurity'
+)
+saveRDS(model_fc_bac, file = "model_fc_bac.rds")
+
+pred_probs_fc <- predict(model_fc_bac, testData, type = "prob")[, "IBD"]
+roc_fc <- roc(testData$group, pred_probs_fc)
+best_threshold_fc <- coords(roc_fc, "best", best.method = "youden", ret = "threshold")[1, 1]
+
+# ------------------------------------------------------------------------------
+# B. Bacterial Markers Only Model (w/o FC)
+# ------------------------------------------------------------------------------
+trainData_bac <- trainData[, !(names(trainData) %in% c("FC"))]
+testData_bac  <- testData[, !(names(testData) %in% c("FC"))]
+
+set.seed(100)
+model_bac <- train(
+  group ~ .,
+  data = trainData_bac,
+  method = "ranger",
+  metric = "ROC",
+  trControl = control,
+  tuneGrid = tunegrid,
+  num.trees = 700,
+  max.depth = 10,
+  importance = 'impurity'
+)
+saveRDS(model_bac, file = "model_bac_only.rds")
+
+pred_probs_bac <- predict(model_bac, testData_bac, type = "prob")[, "IBD"]
+roc_bac <- roc(testData_bac$group, pred_probs_bac)
+best_threshold_bac <- coords(roc_bac, "best", best.method = "youden", ret = "threshold")[1, 1]
+
+# ------------------------------------------------------------------------------
+# Save Test Predictions
+# ------------------------------------------------------------------------------
+save_results <- data.frame(
+  fc.ddpcr_model_POD = pred_probs_fc,
+  ddpcr_model_POD    = pred_probs_bac,
+  group              = testData$group,
+  FC                 = testData$FC,
+  best_threshold_fc_ddpcr = best_threshold_fc,
+  best_threshold_ddpcr    = best_threshold_bac
+)
+rownames(save_results) <- rownames(testData)
+
+write.csv(save_results, "test_predictions.csv")
+
