@@ -1,0 +1,119 @@
+# ==============================================================================
+# Model Construction using ddPCR and Flow Cytometry Data (Random Forest via caret/ranger)
+# ==============================================================================
+
+library(caret)
+library(ranger)
+library(dplyr)
+library(pROC)
+
+# Define feature list
+feature <- setdiff(names(data), "group")
+
+# Train control parameters (10-fold CV)
+control <- trainControl(
+  method = "cv",
+  number = 10,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final",
+  verboseIter = FALSE
+)
+
+# Tuning grid for Random Forest
+tunegrid <- expand.grid(
+  mtry = 1:ceiling(sqrt(length(feature))),
+  splitrule = "gini",
+  min.node.size = c(50, 100, 150)
+)
+
+set.seed(321)
+
+# Split dataset into training and testing sets (70/30)
+trainIndex <- createDataPartition(data$group, p = 0.7, list = FALSE)
+trainData <- data[trainIndex, ]
+testData <- data[-trainIndex, ]
+
+# Format group labels
+trainData$group <- factor(trainData$group, levels = c("Controls", "IBD"))
+testData$group <- factor(testData$group, levels = c("Controls", "IBD"))
+
+# ------------------------------------------------------------------------------
+# Full Feature Model (ddPCR + FC)
+# ------------------------------------------------------------------------------
+set.seed(100)
+model <- train(
+  group ~ .,
+  data = trainData,
+  method = "ranger",
+  metric = "ROC",
+  trControl = control,
+  tuneGrid = tunegrid,
+  num.trees = 700,
+  max.depth = 10,
+  importance = 'impurity'
+)
+
+pred_probs <- predict(model, testData, type = "prob")[, "IBD"]
+roc_obj <- roc(testData$group, pred_probs)
+
+# Calculate AUC confidence interval
+ci_auc <- ci.auc(roc_obj) 
+ci_auc
+
+best_threshold <- coords(roc_obj, "best", best.method = "youden", ret = "threshold")
+best_threshold
+
+pred_class <- factor(ifelse(pred_probs > best_threshold[1, 1], "IBD", "Controls"),
+                     levels = c("Controls", "IBD"))
+confusion_mat <- confusionMatrix(pred_class, testData$group, positive = "IBD")
+confusion_mat
+
+# ------------------------------------------------------------------------------
+# ddPCR-only Model (Excluding FC column)
+# ------------------------------------------------------------------------------
+trainData_ddPCR <- trainData[, !(names(trainData) %in% c("FC"))]
+testData_ddPCR  <- testData[, !(names(testData) %in% c("FC"))]
+
+set.seed(100)
+model_ddPCR <- train(
+  group ~ .,
+  data = trainData_ddPCR,
+  method = "ranger",
+  metric = "ROC",
+  trControl = control,
+  tuneGrid = tunegrid,
+  num.trees = 700,
+  max.depth = 10,
+  importance = 'impurity'
+)
+
+pred_probs_ddPCR <- predict(model_ddPCR, testData_ddPCR, type = "prob")[, "IBD"]
+roc_obj_ddPCR <- roc(testData_ddPCR$group, pred_probs_ddPCR)
+
+ci_auc_ddPCR <- ci.auc(roc_obj_ddPCR) 
+ci_auc_ddPCR
+
+best_threshold_ddPCR <- coords(roc_obj_ddPCR, "best", best.method = "youden", ret = "threshold")
+best_threshold_ddPCR
+
+pred_class_ddPCR <- factor(ifelse(pred_probs_ddPCR > best_threshold_ddPCR[1, 1], "IBD", "Controls"),
+                           levels = c("Controls", "IBD"))
+confusion_mat_ddPCR <- confusionMatrix(pred_class_ddPCR, testData_ddPCR$group, positive = "IBD")
+confusion_mat_ddPCR
+
+# Save test set prediction results
+save_results <- cbind(
+  predict(model, testData, type = "prob"),
+  predict(model_ddPCR, testData_ddPCR, type = "prob")
+)
+save_results <- save_results[, c(2, 4)]
+colnames(save_results) <- c("fc.ddpcr_model_POD", "ddpcr_model_POD")
+
+rownames(save_results) <- rownames(testData)
+save_results$group <- testData$group
+save_results$FC <- testData$FC
+save_results$best_threshold_fc_ddpcr <- best_threshold[1, 1]
+save_results$best_threshold_ddpcr <- best_threshold_ddPCR[1, 1]
+
+write.csv(save_results, "testset_results_18marker.csv")
