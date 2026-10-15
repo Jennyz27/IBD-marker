@@ -1,5 +1,5 @@
 # ==============================================================================
-# Model Construction using ddPCR and Flow Cytometry Data (Random Forest via caret/ranger)
+# Model Construction using ddPCR and FC Data
 # ==============================================================================
 
 library(caret)
