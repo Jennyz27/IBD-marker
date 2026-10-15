@@ -1,0 +1,95 @@
+# ==============================================================================
+# Figure 2d-f: ROC Curves for Test Set (FC, 6 Bac, and FC + 6 Bac Models)
+# ==============================================================================
+
+library(pROC)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+
+# 1. Universal ROC plotting function with CI and threshold marker
+plot_roc_ci <- function(data, label_col, score_col,
+                        positive_class, negative_class,
+                        title_text, threshold, model_label) {
+  df <- data %>%
+    dplyr::filter(!!sym(label_col) %in% c(positive_class, negative_class)) %>%
+    dplyr::mutate(binary_label = factor(!!sym(label_col),
+                                        levels = c(negative_class, positive_class)))
+  
+  roc_obj  <- pROC::roc(df$binary_label, df[[score_col]],
+                        levels = c(negative_class, positive_class),
+                        direction = "<")
+  auc_val  <- round(pROC::auc(roc_obj), 4)
+  
+  # Calculate sensitivity and specificity at the given threshold
+  coords_df <- pROC::coords(roc_obj, x = threshold, input = "threshold",
+                            ret = c("sensitivity", "specificity"))
+  sens <- round(coords_df["sensitivity"], 2)
+  spec <- round(coords_df["specificity"], 2)
+  
+  # Compute confidence intervals for ROC curve
+  ci_obj <- pROC::ci.se(roc_obj, specificities = seq(0, 1, length.out = 25))
+  ci_df  <- data.frame(
+    x     = as.numeric(rownames(ci_obj)),
+    lower = ci_obj[, 1],
+    upper = ci_obj[, 3]
+  )
+  
+  p <- pROC::ggroc(list(data = roc_obj), legacy.axes = TRUE, size = 1.2) +
+    theme_bw() +
+    xlab("1 - Specificity") +
+    ylab("Sensitivity") +
+    ggtitle(title_text) +
+    theme(
+      legend.position = "none",
+      plot.title      = element_text(size = 16, color = "black", face = "bold", hjust = 0.5),
+      axis.title      = element_text(size = 14, face = "bold", color = "black"),
+      axis.text       = element_text(size = 12, color = "black"),
+      panel.grid      = element_blank(),
+      panel.background = element_rect(color = 'black', fill = 'transparent'),
+      panel.border    = element_rect(fill = NA, color = "black", size = 1.1)
+    ) +
+    scale_x_continuous(expand = c(0.01, 0)) +
+    scale_y_continuous(expand = c(0.01, 0)) +
+    geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1),
+                 color = "black", size = 0.6, linetype = 2) +
+    scale_colour_manual(values = "#B60A1C") +
+    annotate("text", x = 0.85, y = 0.2,
+             label = paste0("AUC = ", formatC(auc_val, format = "f", digits = 2)),
+             size = 6, hjust = 1) +
+    geom_ribbon(data = ci_df,
+                aes(x = 1 - x, ymin = lower, ymax = upper),
+                fill = "#f8766d", alpha = 0.2, inherit.aes = FALSE) +
+    geom_point(aes(x = as.numeric(1 - spec), y = as.numeric(sens)),
+               color = "blue", size = 3) +
+    annotate("text", x = as.numeric(1 - spec), y = as.numeric(sens + 0.06),
+             label = paste0("Threshold = ", round(threshold, 2),
+                            "\nSens = ", sens,
+                            "\nSpec = ", spec),
+             size = 4, hjust = 0.5, color = "blue") +
+    annotate("text", x = 0.5, y = 0.5, label = model_label, size = 6, fontface = "bold", color = "black")
+  
+  return(p)
+}
+
+# 2. Load test predictions data
+test_data <- read.csv("test_predictions.csv", row.names = 1)
+n_ibd <- sum(test_data$group == "IBD")
+n_ctrl <- sum(test_data$group == "Controls")
+title_test <- paste0("IBD(", n_ibd, ") vs Controls(", n_ctrl, ")")
+
+# Get optimal thresholds from saved data
+thresh_fc <- 100 # Standard clinical threshold for FC, or use optimized
+thresh_bac <- unique(test_data$best_threshold_ddpcr)[1]
+thresh_fc_bac <- unique(test_data$best_threshold_fc_ddpcr)[1]
+
+# 3. Generate individual panels for d, e, f
+p_d <- plot_roc_ci(test_data, "group", "FC", "IBD", "Controls", title_test, threshold = thresh_fc, model_label = "Fecal calprotectin")
+p_e <- plot_roc_ci(test_data, "group", "ddpcr_model_POD", "IBD", "Controls", title_test, threshold = thresh_bac, model_label = "Six bacterial markers")
+p_f <- plot_roc_ci(test_data, "group", "fc.ddpcr_model_POD", "IBD", "Controls", title_test, threshold = thresh_fc_bac, model_label = "Fecal calprotectin +\nSix bacterial markers")
+
+# 4. Combine into Fig 2d-f layout
+fig_def <- p_d | p_e | p_f
+print(fig_def)
+
+ggsave("figure_2_def_test_roc.png", fig_def, width = 16, height = 5.5, dpi = 600)
