@@ -1,0 +1,89 @@
+# ==============================================================================
+# Figure 3A: ROC Curve and AUC with Confidence Interval for Test Set
+# ==============================================================================
+
+library(pROC)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(tidyr)
+library(caret)
+library(ranger)
+library(ggpubr)
+
+# Unified theme colors
+mycol   <- "#B60A1C"
+fillcol <- "#f8766d"
+
+# ROC plotting function with CI and threshold marker
+plot_roc_ci <- function(data, label_col, score_col,
+                        positive_class, negative_class,
+                        title_text, threshold) {
+  df <- data %>%
+    dplyr::filter(!!sym(label_col) %in% c(positive_class, negative_class)) %>%
+    dplyr::mutate(binary_label = factor(!!sym(label_col),
+                                        levels = c(negative_class, positive_class)))
+  
+  roc_obj  <- pROC::roc(df$binary_label, df[[score_col]],
+                        levels = c(negative_class, positive_class),
+                        direction = "<")
+  auc_val  <- round(pROC::auc(roc_obj), 4)
+  
+  coords_df <- pROC::coords(roc_obj, x = threshold, input = "threshold",
+                            ret = c("sensitivity", "specificity"))
+  sens <- round(coords_df["sensitivity"], 2)
+  spec <- round(coords_df["specificity"], 2)
+  
+  ci_obj <- pROC::ci.se(roc_obj, specificities = seq(0, 1, length.out = 25))
+  ci_df  <- data.frame(
+    x     = as.numeric(rownames(ci_obj)),
+    lower = ci_obj[, 1],
+    upper = ci_obj[, 3]
+  )
+  
+  p <- pROC::ggroc(list(data = roc_obj), legacy.axes = TRUE, size = 1.2) +
+    theme_bw() +
+    xlab("1 - Specificity") +
+    ylab("Sensitivity") +
+    ggtitle(title_text) +
+    theme(
+      legend.position = "none",
+      title           = element_text(size = 20, color = "black", face = "bold"),
+      plot.title      = element_text(hjust = 0.5),
+      axis.title.x    = element_text(size = 18, face = "bold"),
+      axis.text.x     = element_text(size = 18, color = "black", hjust = 0.7),
+      axis.text.y     = element_text(size = 18, color = "black"),
+      axis.title.y    = element_text(size = 18, face = "bold"),
+      panel.grid      = element_blank(),
+      panel.background = element_rect(color = 'black', fill = 'transparent'),
+      panel.border    = element_rect(fill = NA, color = "black", size = 1.1)
+    ) +
+    scale_x_continuous(expand = c(0.01, 0)) +
+    scale_y_continuous(expand = c(0.01, 0)) +
+    geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1),
+                 color = "black", size = 0.6, linetype = 2) +
+    scale_colour_manual(values = mycol) +
+    annotate("text", x = 0.9, y = 0.2,
+             label = paste0("AUC = ", formatC(auc_val, format = "f", digits = 2)),
+             size = 10, hjust = 1) +
+    geom_ribbon(data = ci_df,
+                aes(x = 1 - x, ymin = lower, ymax = upper),
+                fill = fillcol, alpha = 0.2, inherit.aes = FALSE) +
+    geom_point(aes(x = as.numeric(1 - spec), y = as.numeric(sens)),
+               color = "blue", size = 3) +
+    annotate("text", x = as.numeric(1 - spec), y = as.numeric(sens + 0.05),
+             label = paste0("Threshold = ", threshold,
+                            "\nSens = ", sens,
+                            "\nSpec = ", spec),
+             size = 6, hjust = 0.5, color = "blue")
+  
+  return(p)
+}
+
+test_res <- read.csv("testset_results_18marker.csv", row.names = 1)
+best_threshold_ddpcr <- test_res[1, 6]
+title_text_IBD <- paste0("IBD(", sum(test_res$group == "IBD"), ") vs Controls(", sum(test_res$group == "Controls"), ")")
+
+p_ddPCR <- plot_roc_ci(test_res, "group", "ddpcr_model_POD", "IBD", "Controls", title_text_IBD, threshold = round(best_threshold_ddpcr, 3))
+print(p_ddPCR)
+ggsave("p_ddPCR.png", p_ddPCR, width = 6.2, height = 6.2)
