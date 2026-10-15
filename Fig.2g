@@ -1,0 +1,21 @@
+# ==============================================================================
+# Figure 2g: ROC Curves for Validation Cohort
+# ==============================================================================
+
+# 1. Load validation data (ensure it contains FC, ddpcr_model_POD, fc.ddpcr_model_POD, and group)
+val_data <- read.csv("validation_predictions.csv", row.names = 1)
+
+n_ibd_val <- sum(val_data$group == "IBD")
+n_ctrl_val <- sum(val_data$group == "Controls")
+title_val <- paste0("IBD(", n_ibd_val, ") vs Controls(", n_ctrl_val, ")")
+
+# 2. Generate panels for g
+p_g_fc <- plot_roc_ci(val_data, "group", "FC", "IBD", "Controls", title_val, threshold = thresh_fc, model_label = "Fecal calprotectin")
+p_g_bac <- plot_roc_ci(val_data, "group", "ddpcr_model_POD", "IBD", "Controls", title_val, threshold = thresh_bac, model_label = "Six bacterial markers")
+p_g_comb <- plot_roc_ci(val_data, "group", "fc.ddpcr_model_POD", "IBD", "Controls", title_val, threshold = thresh_fc_bac, model_label = "Fecal calprotectin +\nSix bacterial markers")
+
+# 3. Combine into Fig 2g layout
+fig_g <- p_g_fc | p_g_bac | p_g_comb
+print(fig_g)
+
+ggsave("figure_2_g_validation_roc.png", fig_g, width = 16, height = 5.5, dpi = 600)
