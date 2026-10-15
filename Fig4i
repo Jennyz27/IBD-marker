@@ -1,0 +1,94 @@
+# ==============================================================================
+# Decision Curve Analysis (DCA) Pipeline using rmda
+# ==============================================================================
+
+library(rmda)
+library(dplyr)
+
+# 1. Load and preprocess data
+file_path <- "428GIcohort_pod.csv"
+df <- read.csv(file_path, stringsAsFactors = FALSE)
+
+df <- df %>%
+  filter(!is.na(FC)) %>%
+  mutate(
+    status = ifelse(toupper(trimws(as.character(group))) == "IBD", 1, 0)
+  )
+
+# 2. Fit Decision Curve models
+set.seed(123)
+fit_FC <- decision_curve(
+  status ~ FC, data = df, 
+  study.design = "cohort", bootstraps = 99
+)
+
+set.seed(123)
+fit_6bac <- decision_curve(
+  status ~ X6bac, data = df, 
+  study.design = "cohort", bootstraps = 99
+)
+
+set.seed(123)
+fit_6bac_FC <- decision_curve(
+  status ~ X6bac_FC, data = df, 
+  study.design = "cohort", bootstraps = 99
+)
+
+# Optional: View net benefit summary for individual models
+# summary(fit_6bac, measure = 'NB')
+
+# ==============================================================================
+# 3. Generate Publication-Quality Combined DCA Plot
+# ==============================================================================
+
+png(
+  filename = "decision_curve_analysis.png", 
+  width = 8, height = 6, 
+  units = "in", res = 600
+)
+
+# Set high-resolution plotting margins and font styles
+par(mar = c(5, 5, 3, 2), cex.lab = 1.2, cex.axis = 1.1, font.lab = 2)
+
+# Define models and styling parameters 
+# (Note: rmda includes 'All' and 'None' curves automatically, requiring 5 elements for col/lwd/lty)
+model_list <- list(fit_FC, fit_6bac, fit_6bac_FC)
+model_names <- c("FC alone", "6Bac alone", "FC + 6Bac")
+model_colors <- c("#349839", "#2072A8", "#EA5D2D", "#888888", "#000000") # 3 models + All + None
+model_lwd <- c(2.5, 2.5, 2.5, 1.5, 1.5)
+
+# Step A: Draw base plot with models, All, and None curves
+plot_decision_curve(
+  model_list, 
+  curve.names = model_names, 
+  xlim = c(0, 1), 
+  ylim = c(-0.05, 1.0), 
+  legend.position = "topright", 
+  col = model_colors,
+  confidence.intervals = "none",
+  lty = rep(1, 5),
+  lwd = model_lwd,
+  xlab = "High Risk Threshold", 
+  ylab = "Standardized Net Benefit"
+)
+
+# Step B: Add lightweight background grid lines
+grid(nx = NULL, ny = NULL, col = "#E5E5E5", lty = "dotted", lwd = 1)
+
+# Step C: Re-plot curves on top of the grid to prevent lines from being masked
+par(new = TRUE)
+plot_decision_curve(
+  model_list, 
+  curve.names = model_names, 
+  xlim = c(0, 1), 
+  ylim = c(-0.05, 1.0),
+  legend.position = "topright", 
+  col = model_colors,
+  confidence.intervals = "none",
+  lty = rep(1, 5),
+  lwd = model_lwd,
+  axes = FALSE, xlab = "", ylab = ""
+)
+
+# Close device and save high-resolution image
+dev.off()
