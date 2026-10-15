@@ -1,0 +1,124 @@
+# ==============================================================================
+# Figure 3C: Independent Cohort Validation and ROC Curve
+# ==============================================================================
+
+library(pROC)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(tidyr)
+library(caret)
+library(ranger)
+library(ggpubr)
+
+# Load independent validation dataset
+vali_data <- read.csv("independent_cohrot_ddPCR_data.csv", row.names = 1)  
+vali_data$group <- factor(vali_data$group, levels = c("Controls", "IBD"))
+
+# Predictions using trained models (requires 'model' and 'model_ddPCR' from model construction step)
+pred_probs <- predict(model, vali_data, type = "prob")[, "IBD"]
+roc_obj <- roc(vali_data$group, pred_probs)
+ci_auc <- ci.auc(roc_obj) 
+
+pred_probs_ddPCR <- predict(model_ddPCR, vali_data, type = "prob")[, "IBD"]
+roc_obj_ddPCR <- roc(vali_data$group, pred_probs_ddPCR)
+ci_auc_ddPCR <- ci.auc(roc_obj_ddPCR) 
+
+best_threshold_ddpcr_val <- 0.6403929
+pred_class_ddPCR <- factor(ifelse(pred_probs_ddPCR > best_threshold_ddpcr_val, "IBD", "Controls"),
+                           levels = c("Controls", "IBD"))
+confusion_mat_ddPCR <- confusionMatrix(pred_class_ddPCR, vali_data$group, positive = "IBD")
+
+# Save independent cohort results
+save_results <- cbind(pred_probs, pred_probs_ddPCR)
+save_results <- save_results[, c(2, 4)]
+colnames(save_results) <- c("fc.ddpcr_model_POD", "ddpcr_model_POD")
+
+rownames(save_results) <- rownames(vali_data)
+save_results$group <- vali_data$group
+save_results$best_threshold_fc_ddpcr <- best_threshold[1, 1]
+save_results$best_threshold_ddpcr <- best_threshold_ddpcr_val
+
+write.csv(save_results, "results_independent_cohort.csv")
+
+# Plotting ROC for independent cohort
+mycol   <- "#B60A1C"
+fillcol <- "#f8766d"
+
+plot_roc_ci <- function(data, label_col, score_col,
+                        positive_class, negative_class,
+                        title_text, threshold) {
+  df <- data %>%
+    dplyr::filter(!!sym(label_col) %in% c(positive_class, negative_class)) %>%
+    dplyr::mutate(binary_label = factor(!!sym(label_col),
+                                        levels = c(negative_class, positive_class)))
+  
+  roc_obj  <- pROC::roc(df$binary_label, df[[score_col]],
+                        levels = c(negative_class, positive_class),
+                        direction = "<")
+  auc_val  <- round(pROC::auc(roc_obj), 4)
+  
+  coords_df <- pROC::coords(roc_obj, x = threshold, input = "threshold",
+                            ret = c("sensitivity", "specificity"))
+  sens <- round(coords_df["sensitivity"], 2)
+  spec <- round(coords_df["specificity"], 2)
+  
+  ci_obj <- pROC::ci.se(roc_obj, specificities = seq(0, 1, length.out = 25))
+  ci_df  <- data.frame(
+    x     = as.numeric(rownames(ci_obj)),
+    lower = ci_obj[, 1],
+    upper = ci_obj[, 3]
+  )
+  
+  p <- pROC::ggroc(list(data = roc_obj), legacy.axes = TRUE, size = 1.2) +
+    theme_bw() +
+    xlab("1 - Specificity") +
+    ylab("Sensitivity") +
+    ggtitle(title_text) +
+    theme(
+      legend.position = "none",
+      title           = element_text(size = 20, color = "black", face = "bold"),
+      plot.title      = element_text(hjust = 0.5),
+      axis.title.x    = element_text(size = 18, face = "bold"),
+      axis.text.x     = element_text(size = 18, color = "black", hjust = 0.7),
+      axis.text.y     = element_text(size = 18, color = "black"),
+      axis.title.y    = element_text(size = 18, face = "bold"),
+      panel.grid      = element_blank(),
+      panel.background = element_rect(color = 'black', fill = 'transparent'),
+      panel.border    = element_rect(fill = NA, color = "black", size = 1.1)
+    ) +
+    scale_x_continuous(expand = c(0.01, 0)) +
+    scale_y_continuous(expand = c(0.01, 0)) +
+    geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1),
+                 color = "black", size = 0.6, linetype = 2) +
+    scale_colour_manual(values = mycol) +
+    annotate("text", x = 0.9, y = 0.2,
+             label = paste0("AUC = ", formatC(auc_val, format = "f", digits = 2)),
+             size = 10, hjust = 1) +
+    geom_ribbon(data = ci_df,
+                aes(x = 1 - x, ymin = lower, ymax = upper),
+                fill = fillcol, alpha = 0.2, inherit.aes = FALSE) +
+    geom_point(aes(x = as.numeric(1 - spec), y = as.numeric(sens)),
+               color = "blue", size = 3) +
+    annotate("text", x = as.numeric(1 - spec), y = as.numeric(sens + 0.05),
+             label = paste0("Threshold = ", threshold,
+                            "\nSens = ", sens,
+                            "\nSpec = ", spec),
+             size = 6, hjust = 0.5, color = "blue")
+  
+  return(p)
+}
+
+data_val <- read.csv("results_independent_cohort.csv", row.names = 1)
+
+title_text_val <- paste0("Independent validation\nIBD(",
+                         sum(data_val$group == "IBD"),
+                         ") vs Controls(",
+                         sum(data_val$group == "Controls"), ")")
+
+p_val <- plot_roc_ci(data_val, "group", "ddpcr_model_POD",
+                     positive_class = "IBD", negative_class = "Controls",
+                     title_text = title_text_val,
+                     threshold = round(best_threshold_ddpcr_val, 3))
+print(p_val)
+ggsave("Independent validation-ROC.png", p_val, width = 6, height = 6.2)
