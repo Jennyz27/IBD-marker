@@ -1,0 +1,281 @@
+# ==============================================================================
+# Multi-Model Confounder Adjustment and Forest Plot Visualization using MaAsLin2
+# ==============================================================================
+
+library(Maaslin2)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# 1. Load Data and Preprocess Metadata ----------------------------------------
+df_input_metadata1 <- read.csv("df_input_metadata.csv", row.names = 1)
+df_input_data <- read.csv("df_input_data.csv", row.names = 1)
+
+# Convert all metadata columns except Age and BMI to factors
+cols_to_factor <- setdiff(names(df_input_metadata1), c("Age", "BMI"))
+df_input_metadata1[cols_to_factor] <- lapply(df_input_metadata1[cols_to_factor], factor)
+
+marker_df <- df_input_data
+metadata_df <- df_input_metadata1
+
+# Transpose marker matrix (MaAsLin2 requires features as columns and samples as rows)
+features <- t(marker_df) 
+marker_names <- colnames(marker_df)
+
+# 2. Helper Functions for Maaslin2 Analysis -----------------------------------
+generate_references <- function(metadata, fixed_effects, random_effects = NULL) {
+  all_effects <- c(fixed_effects, random_effects)
+  references <- c()
+  
+  for (effect in all_effects) {
+    if (effect %in% colnames(metadata)) {
+      if (is.factor(metadata[[effect]]) && nlevels(metadata[[effect]]) >= 2) {
+        ref_level <- levels(metadata[[effect]])[1]
+        references <- c(references, paste0(effect, ",", ref_level))
+      }
+    }
+  }
+  return(references)
+}
+
+run_maaslin2_analysis <- function(features, metadata, fixed_effects = NULL, 
+                                  random_effects = NULL, output_dir, level_name) {
+  cat(paste0("Running MaAsLin2 for: ", level_name, "\n"))
+  dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+  
+  references <- generate_references(metadata, fixed_effects, random_effects)
+  
+  if ("Disease_status" %in% colnames(metadata)) {
+    if (!"Disease_status,Controls" %in% references) {
+      references <- c("Disease_status,Controls", references)
+    }
+  }
+  
+  fit_data <- Maaslin2(
+    input_data = features,
+    input_metadata = metadata,
+    output = output_dir,
+    fixed_effects = fixed_effects,
+    random_effects = random_effects,
+    reference = references,
+    cores = 4
+  )
+  
+  return(list(
+    results = fit_data$results,
+    fit_data = fit_data,
+    output_dir = output_dir
+  ))
+}
+
+# 3. Define Analysis Models (Model 0 to Model 5) -------------------------------
+
+run_Model0 <- function(features, metadata, output_base_dir = "maaslin2_results") {
+  output_dir <- file.path(output_base_dir, "Model0")
+  res <- run_maaslin2_analysis(features, metadata, fixed_effects = c("Disease_status"), 
+                               output_dir = output_dir, level_name = "Model0 (Crude)")
+  filtered_res <- res$results %>% filter(metadata == "Disease_status" & value == "IBD")
+  return(list(results = filtered_res, fit_data = res$fit_data, output_dir = res$output_dir))
+}
+
+run_Model1 <- function(features, metadata, output_base_dir = "maaslin2_results") {
+  output_dir <- file.path(output_base_dir, "Model1")
+  complete_data <- metadata %>% filter(!is.na(Age) & !is.na(Gender) & !is.na(Ethnicity) & !is.na(Disease_status))
+  complete_features <- features[, rownames(complete_data)]
+  
+  res <- run_maaslin2_analysis(complete_features, complete_data, 
+                               fixed_effects = c("Disease_status", "Age", "Gender"), 
+                               random_effects = c("Ethnicity"), 
+                               output_dir = output_dir, level_name = "Model1 (Basic)")
+  filtered_res <- res$results %>% filter(metadata == "Disease_status" & value == "IBD")
+  return(list(results = filtered_res, fit_data = res$fit_data, data_used = complete_data, output_dir = res$output_dir))
+}
+
+run_Model2 <- function(features, metadata, output_base_dir = "maaslin2_results") {
+  output_dir <- file.path(output_base_dir, "Model2")
+  metadata_adj <- metadata %>%
+    mutate(
+      Group_adj = ifelse(Disease_status == "Controls", "CD", as.character(Group)),
+      Group_adj = factor(Group_adj, levels = c("CD", "UC")),
+      activity_adj = ifelse(Disease_status == "Controls", "InActive", as.character(Disease_activity_act_inac)),
+      activity_adj = factor(activity_adj, levels = c("InActive", "Active"))
+    )
+  
+  complete_data <- metadata_adj %>% 
+    filter(!is.na(Age) & !is.na(Gender) & !is.na(Ethnicity) & !is.na(Disease_status) & !is.na(Group_adj) & !is.na(activity_adj))
+  complete_features <- features[, rownames(complete_data)]
+  
+  res <- run_maaslin2_analysis(complete_features, complete_data, 
+                               fixed_effects = c("Disease_status", "Age", "Gender", "Group_adj", "activity_adj"), 
+                               random_effects = c("Ethnicity"), 
+                               output_dir = output_dir, level_name = "Model2 (Basic + Disease Characteristics)")
+  filtered_res <- res$results %>% filter(metadata == "Disease_status" & value == "IBD")
+  return(list(results = filtered_res, fit_data = res$fit_data, data_used = complete_data, output_dir = res$output_dir))
+}
+
+run_Model3 <- function(features, metadata, output_base_dir = "maaslin2_results") {
+  output_dir <- file.path(output_base_dir, "Model3")
+  complete_data <- metadata %>% 
+    filter(!is.na(Age) & !is.na(Gender) & !is.na(Ethnicity) & !is.na(Disease_status) & !is.na(BMI) & !is.na(Smoke) & !is.na(Alcohol) & !is.na(Vegetarian_status))
+  complete_features <- features[, rownames(complete_data)]
+  
+  res <- run_maaslin2_analysis(complete_features, complete_data, 
+                               fixed_effects = c("Disease_status", "Age", "Gender", "BMI", "Smoke", "Alcohol", "Vegetarian_status"), 
+                               random_effects = c("Ethnicity"), 
+                               output_dir = output_dir, level_name = "Model3 (Basic + Lifestyle)")
+  filtered_res <- res$results %>% filter(metadata == "Disease_status" & value == "IBD")
+  return(list(results = filtered_res, fit_data = res$fit_data, data_used = complete_data, output_dir = res$output_dir))
+}
+
+run_Model4 <- function(features, metadata, output_base_dir = "maaslin2_results") {
+  output_dir <- file.path(output_base_dir, "Model4")
+  complete_data <- metadata %>% 
+    filter(!is.na(Age) & !is.na(Gender) & !is.na(Ethnicity) & !is.na(Disease_status) & !is.na(Mesalazine) & !is.na(Steriods) & !is.na(Immunosuppressant) & !is.na(Biologics))
+  complete_features <- features[, rownames(complete_data)]
+  
+  res <- run_maaslin2_analysis(complete_features, complete_data, 
+                               fixed_effects = c("Disease_status", "Age", "Gender", "Mesalazine", "Steriods", "Immunosuppressant", "Biologics"), 
+                               random_effects = c("Ethnicity"), 
+                               output_dir = output_dir, level_name = "Model4 (Basic + Medication)")
+  filtered_res <- res$results %>% filter(metadata == "Disease_status" & value == "IBD")
+  return(list(results = filtered_res, fit_data = res$fit_data, data_used = complete_data, output_dir = res$output_dir))
+}
+
+run_Model5 <- function(features, metadata, output_base_dir = "maaslin2_results") {
+  output_dir <- file.path(output_base_dir, "Model5")
+  metadata_adj <- metadata %>%
+    mutate(
+      Group_adj = ifelse(Disease_status == "Controls", "CD", as.character(Group)),
+      Group_adj = factor(Group_adj, levels = c("CD", "UC")),
+      activity_adj = ifelse(Disease_status == "Controls", "InActive", as.character(Disease_activity_act_inac)),
+      activity_adj = factor(activity_adj, levels = c("InActive", "Active"))
+    )
+  
+  complete_data <- metadata_adj %>% 
+    filter(!is.na(Age) & !is.na(Gender) & !is.na(Ethnicity) & !is.na(Disease_status) & !is.na(BMI) & 
+           !is.na(Smoke) & !is.na(Alcohol) & !is.na(Vegetarian_status) & !is.na(Mesalazine) & 
+           !is.na(Steriods) & !is.na(Immunosuppressant) & !is.na(Biologics) & !is.na(Group_adj) & !is.na(activity_adj))
+  complete_features <- features[, rownames(complete_data)]
+  
+  res <- run_maaslin2_analysis(complete_features, complete_data, 
+                               fixed_effects = c("Disease_status", "Age", "Gender", "BMI", "Smoke", "Alcohol", 
+                                                 "Vegetarian_status", "Mesalazine", "Steriods", "Immunosuppressant", 
+                                                 "Biologics", "Group_adj", "activity_adj"), 
+                               random_effects = c("Ethnicity"), 
+                               output_dir = output_dir, level_name = "Model5 (Full Model)")
+  filtered_res <- res$results %>% filter(metadata == "Disease_status" & value == "IBD")
+  return(list(results = filtered_res, fit_data = res$fit_data, data_used = complete_data, output_dir = res$output_dir))
+}
+
+# Execute All Models
+analysis_results <- list(
+  Model0 = run_Model0(features, metadata_df),
+  Model1 = run_Model1(features, metadata_df),
+  Model2 = run_Model2(features, metadata_df),
+  Model3 = run_Model3(features, metadata_df),
+  Model4 = run_Model4(features, metadata_df),
+  Model5 = run_Model5(features, metadata_df)
+)
+
+# 4. Collect and Format Results for Visualization -----------------------------
+all_data <- data.frame()
+
+for (level_name in names(analysis_results)) {
+  level_results <- analysis_results[[level_name]]$results
+  if (!is.null(level_results) && nrow(level_results) > 0) {
+    temp_df <- level_results %>%
+      mutate(
+        level = level_name,
+        ci_lower = coef - 1.96 * stderr,
+        ci_upper = coef + 1.96 * stderr,
+        significant = qval < 0.25
+      )
+    all_data <- rbind(all_data, temp_df)
+  }
+}
+
+# Feature Name Mapping
+map_df <- data.frame(
+  old = c("A181", "A181.1", "BF", "Bha", "Bwa", "Clep", "Csp", "DF", "EC", "Eu274",
+          "Fs", "Gf", "Gm", "Lasa", "Ospl", "RINT", "RINU", "RO", "Rt"),
+  new = c("AS_UC", "AS_CD", "BF", "BH", "BW", "CL", "CS", "DF", "EC", "ES",
+          "FS", "GF", "GM", "LA", "OS", "RINT", "RINU", "BO", "RT")
+)
+
+all_data$feature <- map_df$new[match(all_data$feature, map_df$old)]
+all_data <- all_data %>% 
+  filter(feature != "AS_UC")
+
+all_data$feature <- gsub("AS_CD", "AS", all_data$feature)
+
+all_data$feature <- factor(all_data$feature, levels = c(
+  "BH", "EC", "AS", "GM", "CS", "BF", "BW", "DF", "ES", "RT", 
+  "GF", "RINT", "RINU", "LA", "OS", "BO", "CL", "FS"
+))
+
+all_data$level <- gsub("Model0", "Crude Model", all_data$level)
+all_data$level <- factor(all_data$level, levels = c("Model5", "Model4", "Model3", "Model2", "Model1", "Crude Model"))
+
+# 5. Generate Faceted Forest Plot ---------------------------------------------
+level_colors <- c(
+  "Crude Model" = "#85BA8F", 
+  "Model1"      = "#349839", 
+  "Model2"      = "#F09594",
+  "Model3"      = "#EA5D2D",
+  "Model4"      = "#A3C8DC",
+  "Model5"      = "#2072A8"
+)
+
+forest_plot <- ggplot(all_data, aes(x = coef, y = level)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", alpha = 0.7) +
+  geom_errorbarh(aes(xmin = ci_lower, xmax = ci_upper, color = level), height = 0.5, linewidth = 1.2, alpha = 0.7) +
+  geom_point(aes(color = level, shape = significant), size = 4) +
+  facet_wrap(~ feature, ncol = 6) +
+  scale_color_manual(
+    values = level_colors, 
+    breaks = c("Crude Model", "Model1", "Model2", "Model3", "Model4", "Model5"),
+    labels = c(
+      "Crude Model" = "Crude Model",
+      "Model1"      = "Model 1: Basic (Age+Gender+Geography)",
+      "Model2"      = "Model 2: Basic + Disease Characteristics",
+      "Model3"      = "Model 3: Basic + Lifestyle Factors",
+      "Model4"      = "Model 4: Basic + Medication",
+      "Model5"      = "Model 5: Full Model"
+    )
+  ) +
+  scale_shape_manual(
+    values = c("TRUE" = 16, "FALSE" = 1),
+    labels = c("TRUE" = "Significant (q < 0.25)", "FALSE" = "Not Significant")
+  ) +
+  labs(
+    x = "Coefficient (IBD vs Controls)", 
+    title = "Forest Plot of Bacterial Markers Association with IBD",
+    subtitle = "Error bars represent 95% confidence intervals"
+  ) +
+  theme_minimal(base_size = 18) +
+  theme(
+    panel.grid.major = element_line(color = "grey90", linewidth = 0.2),
+    panel.grid.minor = element_blank(),
+    strip.background = element_rect(fill = "grey85", color = NA),
+    strip.text = element_text(face = "bold", size = 18),
+    axis.title.x = element_text(size = 20, face = "bold", color = "black"),
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(size = 18, color = "black"),
+    axis.text.x = element_text(size = 18, color = "black"),
+    legend.position = "bottom",
+    legend.text = element_text(size = 18, color = "black"),
+    legend.title = element_text(size = 18, face = "bold"),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0),
+    plot.subtitle = element_text(size = 16, hjust = 0, color = "grey40"),
+    plot.margin = margin(20, 20, 20, 20)
+  ) +
+  guides(
+    color = guide_legend(title = "Analysis Level", nrow = 3),
+    shape = guide_legend(title = "Statistical Significance", nrow = 2, byrow = TRUE)
+  )
+
+print(forest_plot)
+
+# Save Outputs
+ggsave("forest_plot_final20261012.png", plot = forest_plot, width = 18.3, height = 10, dpi = 600)
+write.csv(all_data, "forest_plot_data.csv", row.names = FALSE)
